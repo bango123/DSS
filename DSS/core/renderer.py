@@ -198,11 +198,15 @@ class DSS(torch.nn.Module):
 
     def initCameras(self, cameras, genSunMode="triColor"):
         self.cameras = self.scene.cameras = cameras
-        # C, B, 3, 3
+        # C, B, 3, 3 <-- Originally written by authors
+        # Only way to get C, B, 3, 3 is if c.rotation is B, 3, 3
+        # So make sure to unsqueeze(0) for c.rotation and c.position
         self.allCameraRotation = torch.stack([c.rotation for c in self.cameras], dim=0)
         self.allCameraPosition = torch.stack([c.position for c in self.cameras], dim=0)
         # self.w2cs = torch.stack([c.world2CameraMatrix() for c in self.cameras], dim=0).to(device=self.cameraPosition.device)
         self.cameraInitialized = True
+
+        #Generate sunlight in the z-direction (depth) of the camera.
         sunDirs, sunColors = _genSunLights(self.allCameraRotation[:, :, :, 2], mode=genSunMode)
         self.allSunDirections = self.scene.allSunDirections = sunDirs
         self.allSunColors = self.scene.allSunColors = sunColors
@@ -876,7 +880,7 @@ class DSS(torch.nn.Module):
                           mergeThreshold=self.merge_threshold, considerZ=self.considerZ,
                           topK=self.mergeTopK)
         # compute occluded: isBehind = 1 and filterRho = 0
-        occludedMap = (isBehind == 1) & (rhoMap == 0)
+        occludedMap = ((isBehind == 1) & (rhoMap == 0)).type(torch.float)
         self.local_occlusion = guided_scatter_maps(numPoint, occludedMap.unsqueeze(-1), pointIdxMap, boundingBoxes)
         self.nonvisibility.scatter_add_(1, self.renderable_indices.to(device=self.nonvisibility.device),
                                            self.local_occlusion.to(device=self.nonvisibility.device, dtype=self.nonvisibility.dtype))

@@ -200,7 +200,7 @@ void compute_visiblity_maps_cuda(const at::Tensor &boundingBoxes,
                                  at::Tensor &pointIdxMap,
                                  at::Tensor &bbPositionMap,
                                  at::Tensor &depthMap) {
-  AT_CHECK(inPlane.dim() == 5);
+  TORCH_CHECK(inPlane.dim() == 5);
   const int batchSize = inPlane.size(0);
   const int numPoint = inPlane.size(1);
   const int bbHeight = inPlane.size(2);
