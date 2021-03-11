@@ -1,7 +1,7 @@
 import torch
 from ..utils.mathHelper import dot, div, mul, det22, normalize, mm, inverse22, inverse33
 from ..utils.matrixConstruction import convertWorldToCameraTransform, batchLookAt, batchAffineMatrix
-from pytorch_points.network import operations
+#from pytorch_points.network import operations
 from pytorch_points.utils.pc_utils import read_ply
 
 
@@ -147,12 +147,16 @@ class CameraSampler(object):
             self.allPositions = torch.from_numpy(read_ply(filename, nCam)).to(device=self.device)[:, :3]
             self.allPositions = self.allPositions.unsqueeze(0)
         else:
-            sampleIdx, self.allPositions = operations.furthest_point_sample(points.cuda(), nCam, NCHW=False)
-            self.allPositions = self.allPositions.to(self.device)
-            if normals is not None:
-                _, idx, _ = operations.faiss_knn(100, self.allPositions.cpu(), points.cpu(), NCHW=False)
-                knn_normals = torch.gather(normals.unsqueeze(1).expand(-1, self.allPositions.shape[1], -1, -1), 2, idx.unsqueeze(-1).expand(-1, -1, -1, normals.shape[-1]))
-                normals = torch.mean(knn_normals, dim=2).to(self.device)
+            # THIS IS NOT SUPPORTED IN THIS VERSION OF DSS BECAUSE IMPORTING
+            # from pytorch_points.network import operations
+            # BREAKS OTHER CODE I THAT IMPORTS THIS FILE (https://github.com/bango123/FluidReconstruction)
+            raise NotImplementedError
+            # sampleIdx, self.allPositions = operations.furthest_point_sample(points.cuda(), nCam, NCHW=False)
+            # self.allPositions = self.allPositions.to(self.device)
+            # if normals is not None:
+            #     _, idx, _ = operations.faiss_knn(100, self.allPositions.cpu(), points.cpu(), NCHW=False)
+            #     knn_normals = torch.gather(normals.unsqueeze(1).expand(-1, self.allPositions.shape[1], -1, -1), 2, idx.unsqueeze(-1).expand(-1, -1, -1, normals.shape[-1]))
+            #     normals = torch.mean(knn_normals, dim=2).to(self.device)
 
         if points is not None:
             if points.dim() == 2:
