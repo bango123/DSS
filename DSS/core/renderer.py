@@ -1,74 +1,39 @@
 import torch
-import os
-import numpy as np
-import torch.nn as nn
-from pytorch_points.network import operations
-from pytorch_points.utils.pc_utils import save_ply, read_ply
-from pytorch_points.utils.pytorch_utils import saved_variables
-from ..utils.mathHelper import dot, div, mul, det22, normalize, mm, inverse22, inverse33
-from ..utils.matrixConstruction import convertWorldToCameraTransform, batchLookAt, batchAffineMatrix
-from ..cuda import rasterizeDSS, rasterizeRBF, guided_scatter_maps
-from .scene import Scene
+from pytorch3d.renderer import PointsRenderer, NormWeightedCompositor
+from pytorch3d.renderer.compositing import weighted_sum
+from .. import logger_py
 
 
-modifiers = ["localPoints",
-             "pointColors",
-             "localNormals",
-             "cameraPosition",
-             "cameraRotation",
-             "pointPosition",
-             "pointRotation",
-             "pointScale",
-             "pointlightPositions",
-             "pointlightColors",
-             "sunDirections",
-             "sunColors",
-             "ambientLight",
-             ]
+__all__ = ['SurfaceSplattingRenderer']
 
-def _check_values(tensor):
-    return not (torch.any(torch.isnan(tensor)) or torch.any(torch.isinf(tensor)))
-
-def _findEllipseBoundingBox(a, b, c, d):
-    """
-    Expects the parameters of the ellipse equation:
-    a x ^ 2 + b y ^ 2 + c xy = d
-    returns radius along x and y axis
-    """
-    # or: a x^2 + b y^2 + c xy = d # Eq 1
-    # solve x on varying y
-    # set determinant to zero -> y_max
-    # same for x_max
-    c2 = c**2
-    ab4 = 4*a*b
-    y = torch.sqrt(4*a*d/(ab4-c2))
-    x = torch.sqrt(4*b*d/(ab4-c2))
-    # x = (-c*y_/2/a).abs()
-    # y = (-c*x_/2/a).abs()
-    return (x, y)
+"""
+Returns a 4-Channel image for RGBA
+"""
 
 
-def _genSunLights(camForward: torch.tensor, mode="triColor") -> torch.Tensor:
-    """
-    generate rgb sun lights depending on camera position
-    """
-    if mode == "triColor":
-        # R around camera position
-        rDir = normalize(camForward).cuda()
-        rColor = torch.tensor([0.9, 0, 0], dtype=camForward.dtype).expand_as(rDir).cuda()
+class SurfaceSplattingRenderer(PointsRenderer):
 
-        bDir = normalize((rDir + torch.rand_like(rDir)).cross(rDir)).cuda()
-        bColor = torch.tensor([0, 0.9, 0], dtype=camForward.dtype).expand_as(bDir).cuda()
+    def __init__(self, rasterizer, compositor, antialiasing_sigma: float = 1.0,
+                 density: float = 1e-4, frnn_radius=-1):
+        super().__init__(rasterizer, compositor)
 
-        gDir = (bDir).cross(rDir).cuda()
-        gColor = torch.tensor([0, 0.0, 0.9], dtype=camForward.dtype).expand_as(bDir).cuda()
+        self.cameras = self.rasterizer.cameras
+        self._Vrk_h = None
+        # screen space low pass filter
+        self.antialiasing_sigma = antialiasing_sigma
+        # average of squared distance to the nearest neighbors
+        self.density = density
 
-        return torch.stack([rDir, bDir, gDir], dim=-2), torch.stack([rColor, bColor, gColor], dim=-2)
-    else:
-        Dir = normalize(camForward).cuda()
-        color = torch.tensor([0.9, 0.9, 0.9], dtype=camForward.dtype).expand_as(Dir).cuda()
-        return Dir.unsqueeze(-2), color.unsqueeze(-2)
+        if self.compositor is None:
+            logger_py.info('Composite with weighted sum.')
+        elif not isinstance(self.compositor, NormWeightedCompositor):
+            logger_py.warning('Expect a NormWeightedCompositor, but initialized with {}'.format(
+                self.compositor.__class__.__name__))
 
+        self.frnn_radius = frnn_radius
+        # logger_py.error("frnn_radius: {}".format(frnn_radius))
+
+<<<<<<< HEAD
 
 def _computeDensity(points, knn_k=33, radius=0.1):
     radius2 = radius*radius
@@ -774,76 +739,16 @@ class DSS(torch.nn.Module):
             return False
 
     def convertToCameraSpace(self):
+=======
+    def forward(self, point_clouds, **kwargs) -> torch.Tensor:
+>>>>>>> d96260c8c0b926ba2fd43d82eb3e0afd970a046a
         """
-        convert localPoints and localNormals to camera space
-        cameraPoints = m2c*localPoitns = w2c*m2w*localPoints
-        cameraPoints / cameraPoints[:,3]
+        point_clouds_filter: used to get activation mask and update visibility mask
+        cutoff_threshold
         """
-        # localPoints (PN, 3)
-        if self.localPoints.dim() == 2:
-            PN = self.localPoints.size()[0]
-        else:
-            PN = self.localPoints.size()[1]
-        # Create model to world matrix (4x4)
-        if self._need_to_compute("m2w"):
-            self.m2w = batchAffineMatrix(self.pointRotation, self.pointPosition, self.pointScale)
-        # depending on camera model, gives the right world-to-camera matrix
-        if self._need_to_compute("w2c"):
-            self.w2c = self.world2CameraMatrix(self.cameraRotation, self.cameraPosition)
-
-        self.m2c = torch.matmul(self.w2c, self.m2w)
-        # self.Smv = self.pointScale
-        # self.Svp = self.camera.sv
-        # create 4d homogeneous points
-        pShape = list(self.localPoints.shape)
-        pShape[-1] = 1
-        homPoints = torch.cat((self.localPoints, torch.ones(pShape, device=self.localPoints.device)), -1)
-        # points in camera space
-        self.cameraPoints = torch.matmul(homPoints, self.m2c.transpose(1, 2))[:, :, :3].contiguous()
-        # transform the normals
-        # self.worldNormals = torch.matmul(self.localNormals, self.m2w[:, :3, :3].transpose(1,2))
-        self.cameraNormals = torch.matmul(self.localNormals, self.m2c[:, :3, :3].transpose(1,2))
-        # normalize since m2w, m2c can have scaling scale
-        # self.worldNormals = normalize(self.worldNormals, -1)
-        self.cameraNormals = normalize(self.cameraNormals, -1)
-        # from the point's perspective, where is the camera
-        camDir = -normalize(self.cameraPoints, -1)
-        self.normalAngle = dot(camDir, self.cameraNormals, -1)
-        if not self.backfaceCulling:
-            self.cameraNormals = torch.where(self.normalAngle.unsqueeze(-1) < 0, -self.cameraNormals, self.cameraNormals)
-            self.normalAngle = dot(camDir, self.cameraNormals, -1)
-
-        # transform light source to camera view
-        if self.pointlightPositions is None or self.pointlightPositions.size()[0] == 0:
-            self.cameraPointlights = None
-        else:
-            pShape = list(self.pointlightPositions.size())
-            pShape[-1] = 1
-            homLights = torch.cat((self.pointlightPositions, torch.ones(pShape, device=self.pointlightPositions.device)), dim=-1)
-            self.cameraPointlights = torch.matmul(homLights, self.w2c.cuda().transpose(1, 2))
-            self.cameraPointlights = torch.cat([self.cameraPointlights[:, :3], self.pointlightColors], dim=-1)
-
-        if self.sunDirections is None or self.sunDirections.size()[0] == 0:
-            self.cameraSuns = None
-        else:
-            self.cameraSuns = torch.matmul(self.sunDirections, self.w2c[:, :3, :3].cuda().transpose(1, 2))
-            self.cameraSuns = normalize(self.cameraSuns, -1)
-            self.cameraSuns = torch.cat([self.cameraSuns, self.sunColors], dim=-1)
-
-    def updateLocalSize(self, decay):
-        if self.backwardLocalSize is not None:
-            self.backwardLocalSize *= decay
-            self.backwardLocalSize = round(max(self.minBackwardLocalSize, self.backwardLocalSize))
-
-    def render(self, **kwargs):
-        assert(self.cloudInitialized), "Must call setCloud() before invoking render()"
-        self.convertToCameraSpace()
-        if not self.filterRenderablePoints():
+        if point_clouds.isempty():
             return None
-        numPoint = self._cameraPoints.shape[1]
-        if numPoint == 0:
-            print("No renderable points")
-            return None
+<<<<<<< HEAD
         batchSize, numTotalPoints, _ = self.cameraPoints.shape
 
         self._projPoints = self.camera.projectPoints(self._cameraPoints)
@@ -886,64 +791,45 @@ class DSS(torch.nn.Module):
                                            self.local_occlusion.to(device=self.nonvisibility.device, dtype=self.nonvisibility.dtype))
         final = final.to(device=self._cameraPoints.device)
         return final
+=======
+>>>>>>> d96260c8c0b926ba2fd43d82eb3e0afd970a046a
 
-    def clearVisibility(self):
-        self.nonvisibility.zero_()
-        self.renderTimes.zero_()
+        # rasterize
+        fragments = kwargs.get('fragments', None)
+        if fragments is None:
+            if kwargs.get('verbose', False):
+                fragments, point_clouds, per_point_info = self.rasterizer(point_clouds, **kwargs)
+            else:
+                fragments, point_clouds = self.rasterizer(point_clouds, **kwargs)
 
-    def forward(self):
-        return self.render()
+        # compute weight: scalar*exp(-0.5Q)
+        weights = torch.exp(-0.5 * fragments.qvalue) * fragments.scaler
+        weights = weights.permute(0, 3, 1, 2)
 
+        # from fragments to rgba
+        pts_rgb = point_clouds.features_packed()[:, :3]
 
-class Baseline(DSS):
-    def __init__(self, opt, scene=None):
-        """
-        The renderer is allowed to write to new fields into the scene (for caching purposes).
-        But it does not change any input fields.
-        """
-        super(Baseline, self).__init__(opt, scene)
+        if self.compositor is None:
+            # NOTE: weight _splat_points_weights_backward, weighted sum will return
+            # zero gradient for the weights.
+            images = weighted_sum(fragments.idx.long().permute(0, 3, 1, 2),
+                                  weights,
+                                  pts_rgb.permute(1, 0),
+                                  **kwargs)
+        else:
+            images = self.compositor(
+                fragments.idx.long().permute(0, 3, 1, 2),
+                weights,
+                pts_rgb.permute(1, 0),
+                **kwargs
+            )
 
+        # permute so image comes at the end
+        images = images.permute(0, 2, 3, 1)
+        mask = fragments.occupancy
 
-    def render(self, **kwargs):
-        assert(self.cloudInitialized), "Must call setCloud() before invoking render()"
-        self.convertToCameraSpace()
-        self.filterRenderablePoints()
-        numPoint = self._cameraPoints.shape[1]
-        if numPoint == 0:
-            print("No renderable points")
-            return None
-        self._projPoints = self.camera.projectPoints(self._cameraPoints)
+        images = torch.cat([images, mask.unsqueeze(-1)], dim=-1)
 
-        Vr = self.computeVr(self._cameraPoints)
-        result = self.computeRho(self._projPoints.detach(),
-                                 self._cameraPoints.detach(),
-                                 self._cameraNormals.detach(), self.cutOffThreshold,
-                                 Vr.detach(), self.camera.width, self.camera.height,
-                                 self.camera.far, self.lowPassBandWidth)
-        # rho is the filter value at pixel x
-        # rhoValues is the filter value at ellipse center
-        # ellipse bounding box
-        # screen plane back-projected to 3D
-        rho, rhoValues, boundingBoxes, inPlane, Ms = result
-
-        Ws = self.computeWk(self.shading, self._color,
-                            self._cameraNormals, self._localNormals, self.ambientLight, self._cameraPoints,
-                            self.cameraSuns, self.cameraPointlights)
-
-        final, pointIdxMap, rhoMap, WsMap, isBehind = rasterizeRBF(rho, rhoValues, Ws,
-                          self._projPoints,
-                          boundingBoxes,
-                          inPlane, Ms,
-                          self._cameraPoints[:, :, :3].contiguous(),
-                          self.camera.width, self.camera.height,
-                          self.camera.far, self.camera.focalLength,
-                          localWidth=self.backwardLocalSize, localHeight=self.backwardLocalSize,
-                          mergeThreshold=self.merge_threshold, considerZ=self.considerZ,
-                          topK=self.mergeTopK)
-        # compute occluded: isBehind = 1 and filterRho = 0
-        occludedMap = (isBehind == 1) & (rhoMap == 0)
-        self.local_occlusion = guided_scatter_maps(numPoint, occludedMap.unsqueeze(-1), pointIdxMap, boundingBoxes)
-        self.nonvisibility.scatter_add_(1, self.renderable_indices.to(device=self.nonvisibility.device),
-                                           self.local_occlusion.to(device=self.nonvisibility.device, dtype=self.nonvisibility.dtype))
-        final = final.to(device=self._cameraPoints.device)
-        return final
+        if kwargs.get('verbose', False):
+            return images, fragments
+        return images
