@@ -46,6 +46,8 @@ from DSS.core.lighting import PointLights, DirectionalLights
 from pytorch3d.renderer import Textures
 from pytorch3d.structures import Meshes
 from DSS.utils import convert_tensor_property_to_value_dict
+import os, sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from common import get_tri_color_lights_for_view, get_light_for_view
 
 # torch.manual_seed(0)
@@ -187,7 +189,7 @@ if __name__ == "__main__":
         pcl_dict['colors'] = data_dict['colors']
 
         idx = 0
-        for c_idx, cams in tqdm(camera_sampler):
+        for cams in tqdm(camera_sampler):
             meshes_batch = meshes.extend(batch_size)
             cams = cams.to(device)
 

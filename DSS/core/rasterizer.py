@@ -43,8 +43,11 @@ class PointsRasterizationSettings:
         cutoff_threshold (float): deciding whether inside the splat based on Q < cutoff_threshold
         backface_culling (bool): render only the front-facing faces
         depth_merging_threshold (float): depth threshold for determine zbuffer
-        Vrk_invariant: use 3D spheres of a uniform size to represent a point
-        Vrk_isotropic: use isotropic gaussian in the source space, otherwise compute anisotropic
+        std_VrK_h (float): standard deviation of gaussian used for splatting ellipses
+        Vrk_invariant (REMOVED IN FUNCTION _compute_variance_and_detMk) :
+            use 3D spheres of a uniform size to represent a point
+        Vrk_isotropic  (REMOVED IN FUNCTION _compute_variance_and_detMk):
+            use isotropic gaussian in the source space, otherwise compute anisotropic
             gaussian variance
         radii_backward_scaler (float): the scaler used to increase the splat radius
             for backward pass, used for OccRBFBackward and OccBackward. If zero,
@@ -59,8 +62,9 @@ class PointsRasterizationSettings:
         "cutoff_threshold",
         "backface_culling",
         "depth_merging_threshold",
-        "Vrk_invariant",
-        "Vrk_isotropic",
+        "std_VrK_h",
+        # "Vrk_invariant",
+        # "Vrk_isotropic",
         "radii_backward_scaler",
         "image_size",
         "points_per_pixel",
@@ -75,8 +79,9 @@ class PointsRasterizationSettings:
         backface_culling: bool = True,
         cutoff_threshold: float = 1,
         depth_merging_threshold: float = 0.05,
-        Vrk_invariant: bool = False,
-        Vrk_isotropic: bool = True,
+        std_VrK_h: float = 0.02,
+        # Vrk_invariant: bool = False,
+        # Vrk_isotropic: bool = True,
         radii_backward_scaler: float = 10,
         image_size: int = 256,
         points_per_pixel: int = 8,
@@ -88,8 +93,9 @@ class PointsRasterizationSettings:
         self.cutoff_threshold = cutoff_threshold
         self.backface_culling = backface_culling
         self.depth_merging_threshold = depth_merging_threshold
-        self.Vrk_invariant = Vrk_invariant
-        self.Vrk_isotropic = Vrk_isotropic
+        # self.Vrk_invariant = Vrk_invariant
+        # self.Vrk_isotropic = Vrk_isotropic
+        self.std_VrK_h = std_VrK_h
         self.radii_backward_scaler = radii_backward_scaler
         self.image_size = image_size
         self.points_per_pixel = points_per_pixel
@@ -107,7 +113,7 @@ class SurfaceSplatting(PointsRasterizer):
         2. center of projection (screen range (-1, 1))
     """
 
-    def __init__(self, cameras=None, raster_settings=None, frnn_radius=0.2):
+    def __init__(self, cameras=None, raster_settings=None, frnn_radius=0.2, device='cpu'):
         """
         cameras: A cameras object which has a  `transform_points` method
             which returns the transformed points after applying the
@@ -126,6 +132,7 @@ class SurfaceSplatting(PointsRasterizer):
 
         self.raster_settings = raster_settings
         self.frnn_radius = frnn_radius
+        self.device = device
 
     def transform_normals(self, point_clouds, **kwargs):
         """ Return normals in view coordinates (padded) """
@@ -162,20 +169,22 @@ class SurfaceSplatting(PointsRasterizer):
         normals_padded = point_clouds.normals_padded()
         features_padded = point_clouds.features_padded()
 
+        # WEIRD CUDA GPU MASKING BUG!! GAHHHHHH
+        mask_cpu = mask.cpu()
         # tuple to list, since pointclouds class doesn't accept tuples
-        points_list = [points_padded[b][mask[b]]
+        points_list = [points_padded[b].cpu()[mask_cpu[b]]
                        for b in range(points_padded.shape[0])]
-        normals_list = [normals_padded[b][mask[b]]
+        normals_list = [normals_padded[b].cpu()[mask_cpu[b]]
                         for b in range(normals_padded.shape[0])]
+
         if features_padded is not None:
-            features_list = [features_padded[b][mask[b]]
-                             for b in range(features_padded.shape[0])]
+            features_list = [features_padded[b].cpu()[mask_cpu[b]]
+                           for b in range(features_padded.shape[0])]
             new_point_clouds = point_clouds.__class__(
-                points=points_list, normals=normals_list, features=features_list)
+                points=points_list, normals=normals_list, features=features_list).to(device=self.device)
         else:
             new_point_clouds = point_clouds.__class__(
-                points=points_list, normals=normals_list)
-
+                points=points_list, normals=normals_list).to(device=self.device)
         # for k in per_point_info:
         #     per_point_info[k] = per_point_info[k][mask_packed]
         return new_point_clouds, mask_packed
@@ -200,27 +209,32 @@ class SurfaceSplatting(PointsRasterizer):
         points_padded = point_clouds.points_padded()
         normals_padded = point_clouds.normals_padded()
         features_padded = point_clouds.features_padded()
+
+        # WEIRD CUDA GPU MASKING BUG!! GAHHHHHH
+        mask_cpu = mask.cpu()
         # tuple to list, since pointclouds class doesn't accept tuples
-        points_list = [points_padded[b][mask[b]]
+        points_list = [points_padded[b].cpu()[mask_cpu[b]]
                        for b in range(points_padded.shape[0])]
-        normals_list = features_list = None
-        if normals_padded is not None:
-            normals_list = [normals_padded[b][mask[b]]
-                            for b in range(normals_padded.shape[0])]
+        normals_list = [normals_padded[b].cpu()[mask_cpu[b]]
+                        for b in range(normals_padded.shape[0])]
+
         if features_padded is not None:
-            features_list = [features_padded[b][mask[b]]
-                             for b in range(features_padded.shape[0])]
-        new_point_clouds = point_clouds.__class__(
-            points=points_list, normals=normals_list, features=features_list)
+            features_list = [features_padded[b].cpu()[mask_cpu[b]]
+                           for b in range(features_padded.shape[0])]
+            new_point_clouds = point_clouds.__class__(
+                points=points_list, normals=normals_list, features=features_list).to(device=self.device)
+        else:
+            new_point_clouds = point_clouds.__class__(
+                points=points_list, normals=normals_list)
         # for k in per_point_info:
         #     per_point_info[k] = per_point_info[k][mask_packed]
-        return new_point_clouds, mask_packed
+        return new_point_clouds.cuda(), mask_packed
 
     def filter_renderable(self, point_clouds, point_clouds_filter=None, **kwargs):
         raster_settings = kwargs.get("raster_settings", self.raster_settings)
         cameras = kwargs.get('cameras', self.cameras)
         if point_clouds.isempty():
-            return None, None, None, None
+            return None, None
 
         P = point_clouds.num_points_per_cloud().sum().item()
         max_P = point_clouds.num_points_per_cloud().max().item()
@@ -232,25 +246,20 @@ class SurfaceSplatting(PointsRasterizer):
                 (batch_size, max_P), False, dtype=torch.bool, device=point_clouds_filter.device))
             point_clouds = point_clouds_filter.filter_with(
                 point_clouds, ('activation',))
-
         if cameras.R.shape[0] != len(point_clouds):
             logger_py.warning('Detected unequal number of cameras and pointclouds. '
                               'Call point_clouds.extend(len(cameras)) outside this function, '
                               'otherwise inplace modification to pointclouds will not take effects.')
             point_clouds = point_clouds.extend(cameras.R.shape[0])
-
         point_clouds, valid_depth_mask = self._filter_points_with_invalid_depth(
             point_clouds, **kwargs)
-
         if point_clouds.isempty():
-            return point_clouds, None, None, None
-
+            return point_clouds, None
         # new point clouds containing only points facing towards the camera
         if raster_settings.backface_culling:
             point_clouds, frontface_mask = self._filter_backface_points(
                 point_clouds, **kwargs)
-            valid_depth_mask[valid_depth_mask] = frontface_mask
-
+            valid_depth_mask[torch.clone(valid_depth_mask)] = frontface_mask
         return point_clouds, valid_depth_mask
 
     def _compute_anisotropic_Vrk(self, pointclouds, **kwargs):
@@ -383,7 +392,6 @@ class SurfaceSplatting(PointsRasterizer):
                                              ), num_points_per_cloud.sum().item())
             # [totalP, ]
             h_k = 0.5 * sq_dist.max(dim=-1, keepdim=True)[0]
-
             # prevent some outlier rendered be too large, or too small
             self._Vrk_h = h_k.clamp(5e-5, 0.01)
 
@@ -401,6 +409,34 @@ class SurfaceSplatting(PointsRasterizer):
         Vrk = self._Vrk_h.view(-1, 1, 1) * Sk.transpose(1, 2) @ Sk
         return Vrk, Sk
 
+    def _compute_constant_Vrk(self, pointclouds, std_VrK_h, **kwargs):
+        """
+        determine variance scalar used (see _compute_isotropic_Vrk)
+        Args:
+            pointclouds: pointclouds in object coorindates
+        Returns:
+            h_k: scalar
+            S_k: local frame
+        """
+
+        h_k = std_VrK_h * torch.ones((len(pointclouds), pointclouds.num_points_per_cloud()), device=self.device)
+
+        Vrk_h = gather_batch_to_packed(h_k, pointclouds.packed_to_cloud_idx())
+
+        # Sk, a transformation from 2D local surface frame to 3D world frame
+        # Because isometry, two axis are equivalent, we can simply
+        # find two 3d vectors perpendicular to the point normals
+        # (totalP, 2, 3)
+        with torch.autograd.enable_grad():
+            normals = pointclouds.normals_packed()
+
+        u0 = F.normalize(torch.cross(normals,
+                                     normals + torch.rand_like(normals)), dim=-1)
+        u1 = F.normalize(torch.cross(normals, u0), dim=-1)
+        Sk = torch.stack([u0, u1], dim=1)
+        Vrk = Vrk_h.view(-1, 1, 1) * Sk.transpose(1, 2) @ Sk
+        return Vrk, Sk
+
     def _compute_variance_and_detMk(self, pointclouds, **kwargs):
         """
         Compute the projected kernel variance Vk'+I Eq.(35) in [2],
@@ -416,14 +452,18 @@ class SurfaceSplatting(PointsRasterizer):
         WJk = self._compute_WJk(pointclouds, **kwargs)
         totalP = WJk.shape[0]
 
-        if raster_settings.Vrk_invariant:
-            Vrk, Sk = self._compute_global_Vrk(pointclouds, **kwargs)
-        elif raster_settings.Vrk_isotropic:
-            # (N, 3, 3)
-            Vrk, Sk = self._compute_isotropic_Vrk(
-                pointclouds, **kwargs)
-        else:
-            Vrk, Sk = self._compute_anisotropic_Vrk(pointclouds)
+
+        Vrk, Sk = self._compute_constant_Vrk(pointclouds, raster_settings.std_VrK_h, **kwargs)
+
+        # REMOVED FEATURE. WANTED TO USE CONSTANT RADIUS!!!
+        # if raster_settings.Vrk_invariant:
+        #     Vrk, Sk = self._compute_global_Vrk(pointclouds, **kwargs)
+        # elif raster_settings.Vrk_isotropic:
+        #     # (N, 3, 3)
+        #     Vrk, Sk = self._compute_isotropic_Vrk(
+        #         pointclouds, **kwargs)
+        # else:
+        #     Vrk, Sk = self._compute_anisotropic_Vrk(pointclouds)
 
         Mk = Sk @ WJk
         Vk = WJk.transpose(1, 2) @ Vrk @ WJk
@@ -437,7 +477,6 @@ class SurfaceSplatting(PointsRasterizer):
                        dtype=Vk.dtype) * (pixel_size**2)
 
         detMk = torch.det(Mk)
-
         return variance, detMk
 
     def _compute_WJk(self, point_clouds, **kwargs):
@@ -612,7 +651,6 @@ class SurfaceSplatting(PointsRasterizer):
         if _tmp.requires_grad:
             _tmp.register_hook(lambda x: _check_grad(x, 'transform'))
         pcls_screen = self.transform(point_clouds_filtered, **kwargs)
-
         idx, zbuf, qvalue_map, occ_map = rasterize_elliptical_points(
             pcls_screen,
             per_point_info["ellipse_params"],
@@ -626,7 +664,6 @@ class SurfaceSplatting(PointsRasterizer):
             radii_backward_scaler=raster_settings.radii_backward_scaler,
             clip_pts_grad=raster_settings.clip_pts_grad
         )
-
         # compute weight: scalar*exp(-0.5Q)
         frag_scaler = gather_with_neg_idx(
             per_point_info['scaler'], 0, idx.view(-1).long())
@@ -638,7 +675,7 @@ class SurfaceSplatting(PointsRasterizer):
         # returns (P,) boolean mask for visibility
         visibility_mask = get_per_point_visibility_mask(
             point_clouds_filtered, fragments)
-        mask_filtered[mask_filtered] = visibility_mask
+        mask_filtered[torch.clone(mask_filtered)] = visibility_mask
 
         if point_clouds_filter is not None:
             # update point_clouds visibility filter

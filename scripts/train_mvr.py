@@ -1,3 +1,7 @@
+import DSS
+
+print(DSS.__file__)
+
 import argparse
 import time
 import numpy as np
@@ -13,7 +17,6 @@ from DSS.utils.sampler import WeightedSubsetRandomSampler
 from DSS import logger_py, set_deterministic_
 
 set_deterministic_()
-
 
 # Arguments
 parser = argparse.ArgumentParser(
