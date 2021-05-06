@@ -178,10 +178,12 @@ def gather_with_neg_idx(input: torch.Tensor, dim: int, index: torch.Tensor,
         data (tensor)
         idx (tensor)
     """
-    mask = index >= 0
-    index[~mask] = 0  # a random index
-    out = torch.gather(input, dim, index, out=out, sparse_grad=sparse_grad)
-    out[~mask] = 0
+    mask = (index >= 0).cpu()
+    index_cpu = index.cpu()
+    index_cpu[~mask] = 0  # a random index
+    out_cpu = torch.gather(input, dim, index_cpu.to(index.device), out=out, sparse_grad=sparse_grad).cpu()
+    out_cpu[~mask] = 0
+    out = out_cpu.to(input.device)
     return out
 
 
@@ -326,18 +328,19 @@ def get_per_point_visibility_mask(pointclouds: Pointclouds,
     """
     P_total = pointclouds.num_points_per_cloud().sum().item()
     try:
-        mask = fragments.occupancy.bool()  # float
+        mask = (fragments.occupancy.bool()).cpu()  # float
     except:
-        mask = fragments.idx[..., 0] >= 0  # bool
+        mask = (fragments.idx[..., 0] >= 0).cpu()  # bool
 
     pts_visibility = torch.full(
-        (P_total,), False, dtype=torch.bool, device=pointclouds.device)
+        (P_total,), False, dtype=torch.bool, device=mask.device)
 
     # all rendered points (indices in packed points)
-    visible_idx = fragments.idx[mask].unique().long().view(-1)
+    fragments_idx_cpu = fragments.idx.cpu()
+    visible_idx = fragments_idx_cpu[mask].unique().long().view(-1)
     visible_idx = visible_idx[visible_idx >= 0]
     pts_visibility[visible_idx] = True
-    return pts_visibility
+    return pts_visibility.to(pointclouds.device)
 
 
 def intersection_with_unit_cube(ray0, ray_direction, side_length=1.0, padding=0.1,

@@ -259,8 +259,10 @@ class SurfaceSplatting(PointsRasterizer):
         if raster_settings.backface_culling:
             point_clouds, frontface_mask = self._filter_backface_points(
                 point_clouds, **kwargs)
-            valid_depth_mask[torch.clone(valid_depth_mask)] = frontface_mask
-        return point_clouds, valid_depth_mask
+            # HACK BECAUSE BINARY MASKING IS NOT WORKING ON CUDA......
+            valid_depth_mask_cpu = valid_depth_mask.cpu()
+            valid_depth_mask_cpu[torch.clone(valid_depth_mask_cpu)] = frontface_mask.cpu()
+        return point_clouds, valid_depth_mask_cpu.to(self.device)
 
     def _compute_anisotropic_Vrk(self, pointclouds, **kwargs):
         """
@@ -637,7 +639,6 @@ class SurfaceSplatting(PointsRasterizer):
 
         point_clouds_filtered, mask_filtered = self.filter_renderable(
             point_clouds, point_clouds_filter, **kwargs)
-
         if point_clouds_filtered.isempty():
             return self._empty_fragments(cameras.R.shape[0], **kwargs)
 
@@ -675,7 +676,9 @@ class SurfaceSplatting(PointsRasterizer):
         # returns (P,) boolean mask for visibility
         visibility_mask = get_per_point_visibility_mask(
             point_clouds_filtered, fragments)
-        mask_filtered[torch.clone(mask_filtered)] = visibility_mask
+        mask_filtered_cpu = mask_filtered.cpu()
+        mask_filtered_cpu[torch.clone(mask_filtered_cpu)] = visibility_mask.cpu()
+        mask_filtered = mask_filtered_cpu.to(device=mask_filtered.device)
 
         if point_clouds_filter is not None:
             # update point_clouds visibility filter
