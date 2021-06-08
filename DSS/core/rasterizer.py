@@ -620,7 +620,8 @@ class SurfaceSplatting(PointsRasterizer):
             (batch_size, S, S, P), -1.0, dtype=torch.float, device=self.device)
         occ_map = torch.full((batch_size, S, S), 0,
                              dtype=torch.float, device=self.device)
-        return PointFragments(idx=idx, zbuf=zbuf, qvalue=qvalue_map, occupancy=occ_map)
+        scaler = torch.full((qvalue_map.shape), -1, dtype=torch.float, device=self.device)
+        return PointFragments(idx=idx, zbuf=zbuf, qvalue=qvalue_map, occupancy=occ_map,scaler=scaler)
 
     def forward(self, point_clouds, point_clouds_filter=None, **kwargs) -> PointFragments:
         """
@@ -640,7 +641,10 @@ class SurfaceSplatting(PointsRasterizer):
         point_clouds_filtered, mask_filtered = self.filter_renderable(
             point_clouds, point_clouds_filter, **kwargs)
         if point_clouds_filtered.isempty():
-            return self._empty_fragments(cameras.R.shape[0], **kwargs)
+            if kwargs.get('verbose', False):
+                return self._empty_fragments(cameras.R.shape[0], **kwargs), point_clouds_filtered, None
+            else:
+                return self._empty_fragments(cameras.R.shape[0], **kwargs), point_clouds_filtered
 
         # compute per-point features for elliptical gaussian weights
         with torch.autograd.no_grad():
@@ -891,20 +895,26 @@ class EllipticalRasterizer(autograd.Function):
                 2b. count_sort
             """
             device = pts_screen.device
-            mask = (idx[..., 0] >= 0).bool()  # float
+
+            # Weird boolean mask bug for cuda tensors.... Need to convert to CPU then back to device (e.g. cuda:0)
+            # note that mask, visible_idx, and pts_visibility are all on cpu then converted over to CUDA later
+            idx_cpu = idx.cpu()
+            mask = (idx_cpu[..., 0] >= 0).bool()  # float
             pts_visibility = torch.full(
-                (pts_screen.shape[0],), False, dtype=torch.bool, device=pts_screen.device)
+                (pts_screen.shape[0],), False, dtype=torch.bool)
             # all rendered points (indices in packed points)
-            visible_idx = idx[mask].unique().long().view(-1)
+
+            visible_idx = idx_cpu[mask].unique().long().view(-1)
             visible_idx = visible_idx[visible_idx >= 0]
             pts_visibility[visible_idx] = True
             num_points_per_cloud = torch.stack([x.sum() for x in torch.split(
                 pts_visibility, num_points_per_cloud.tolist(), dim=0)])
             cloud_to_packed_first_idx = num_points_2_cloud_to_packed_first_idx(
-                num_points_per_cloud)
+                num_points_per_cloud).to(device)
 
-            pts_screen_visible = pts_screen[pts_visibility]
-            radii_visible = radii[pts_visibility]
+            pts_screen_visible = pts_screen.cpu()[pts_visibility].to(device)
+            radii_visible = radii.cpu()[pts_visibility].to(device)
+            num_points_per_cloud = num_points_per_cloud.to(device)
 
             #####################################
             #  2a. call FRNN insertion
@@ -1004,12 +1014,14 @@ class EllipticalRasterizer(autograd.Function):
             if torch.isnan(grad_visible).any() or not torch.isfinite(grad_visible).all():
                 print('invalid grad_visible')
             assert(pts_visibility.sum() == grad_visible.shape[0])
-            grads_input_xy = pts_screen.new_zeros(pts_screen.shape[0], 2)
+
+            # Need to do the weird CUDA -> CPU -> CUDA here.... God I hate this bug
+            grads_input_xy = pts_screen.new_zeros(pts_screen.shape[0], 2).cpu()
             grads_input_z = pts_screen.new_zeros(pts_screen.shape[0], 1)
             # print("1")
-            grads_input_xy[pts_visibility] = grad_visible
+            grads_input_xy[pts_visibility] = grad_visible.cpu()
             _C._backward_zbuf(idx, zbuf_grad, grads_input_z)
-            grads_input = torch.cat([grads_input_xy, grads_input_z], dim=-1)
+            grads_input = torch.cat([grads_input_xy.to(device), grads_input_z], dim=-1)
             # print("2")
 
         pts_grad = grads_input
